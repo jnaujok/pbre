@@ -62,6 +62,9 @@ To install the command for everyday use, run `poetry build` and then
 `pipx install dist/pbre-*.whl` (or `pip install .`). From a checkout you can
 also run it with `poetry run python -m pbre ...`.
 
+Every CI run also builds the wheel and sdist and keeps them as a
+downloadable `pbre-dist` artifact on the workflow run's page in the Actions tab.
+
 ## Usage
 
 ```
