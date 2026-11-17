@@ -10,9 +10,11 @@ on:
 permissions:
   contents: write  # needed to create the tag, the release and upload files to it
 
-# Never run two releases at once.
+# One group per tag (or per branch for manual runs), so runs for the same
+# release never overlap, and a pending run for one version can't be replaced
+# by a run for a different version.
 concurrency:
-  group: release
+  group: release-${{ github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -58,8 +60,10 @@ jobs:
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
-            # Creates the tag on the commit this run tested and built.
-            gh release create "${TAG}" dist/* --title "pbre ${TAG}" --generate-notes --target "${GITHUB_SHA}"
-          else
-            gh release create "${TAG}" dist/* --title "pbre ${TAG}" --generate-notes --verify-tag
+            # Create the tag on the commit this run tested and built. Creating
+            # a ref fails if it already exists, so a tag pushed while this run
+            # was testing can never have this run's files attached to it.
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
           fi
+          gh release create "${TAG}" dist/* --title "pbre ${TAG}" --generate-notes --verify-tag
