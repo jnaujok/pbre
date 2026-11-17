@@ -7,10 +7,11 @@ readable form and infer a .proto definition that describes them.
 from .decoder import DecodeOptions, Node, decode
 from .protogen import generate_proto
 from .render import render_text, to_json
+from .scan import Candidate, ScanResult, find_start, scan
 from .schema import FieldSchema, Hint, MessageSchema, infer_schema, parse_hint
 from .wire import DecodeError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DecodeError",
@@ -19,12 +20,16 @@ __all__ = [
     "Hint",
     "MessageSchema",
     "Node",
+    "Candidate",
+    "ScanResult",
     "analyze",
     "decode",
+    "find_start",
     "generate_proto",
     "infer_schema",
     "parse_hint",
     "render_text",
+    "scan",
     "to_json",
 ]
 

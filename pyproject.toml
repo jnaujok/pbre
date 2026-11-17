@@ -1,9 +1,11 @@
 [project]
 name = "pbre"
-version = "0.1.0"
+version = "0.2.0"
 description = "Protobuf reverse engineering: decode schemaless protobuf blobs and infer .proto definitions"
 readme = "README.md"
 requires-python = ">=3.12"
+license = "Apache-2.0"
+license-files = ["LICENSE"]
 dependencies = []
 
 [project.scripts]

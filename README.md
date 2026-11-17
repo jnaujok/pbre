@@ -1,5 +1,12 @@
 # pbre
 
+[![tests](https://github.com/jnaujok/pbre/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jnaujok/pbre/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/jnaujok/pbre?sort=semver)](https://github.com/jnaujok/pbre/releases/latest)
+[![python](https://img.shields.io/badge/python-3.12%2B-blue)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
+[![dependencies](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
+[![packaging](https://img.shields.io/badge/packaging-poetry-cyan)](https://python-poetry.org/)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
+
 **Protobuf reverse engineering.** Give `pbre` a binary protobuf blob with no
 schema. It decodes every field into a readable tree, works out the most likely
 type of each field, and can write a `.proto` file that parses the data. It is
@@ -95,6 +102,7 @@ release.
 ```
 pbre [decode] FILE...  [options]     # show the decoded fields (default command)
 pbre proto    FILE...  [options]     # print or write the inferred .proto
+pbre scan     FILE...  [options]     # find where a message starts/ends in a larger blob
 ```
 
 When you don't pass a file, or pass `-`, pbre reads standard input. If several
@@ -111,6 +119,9 @@ that happens to be empty in one sample is still recognised as a string.
 | `--delimited` | Input is a stream of varint-length-prefixed messages, as written by `writeDelimitedTo`. Each message is one sample. |
 | `--grpc` | Input is gRPC-framed: each message has a 5-byte prefix. Compressed frames are not supported. |
 | `--skip N` | Skip N leading bytes, for example a custom header. |
+| `--find-start` | (`decode`, `proto`) If the input doesn't parse from its first byte, find the most plausible start and end of the message and decode only that span. See [Finding the message in a larger blob](#finding-the-message-in-a-larger-blob). |
+| `--candidate N` | (`decode`, `proto`) Like `--find-start`, but use candidate N from `pbre scan` instead of the best one. |
+| `--repair` | (`decode`, `proto`) Best-effort repair of data that went through a UTF-8 text decode and contains `EF BF BD` sequences. See [Repairing data mangled by a text decode](#repairing-data-mangled-by-a-text-decode). |
 | `--max-field-number N` | Don't read a payload as a nested message if it uses field numbers above N. Lowering this cuts down on binary blobs being mistaken for messages. |
 
 ### Decode options
@@ -131,6 +142,106 @@ that happens to be empty in one sample is still recognised as a string.
 | `--syntax proto2\|proto3` | Defaults to proto3. pbre switches to proto2 automatically if the data contains groups. |
 | `--no-comments` | Leave out sample values and inference notes. |
 | `-H, --hint PATH=TYPE[:NAME]` | Override the inferred type and/or name of a field (repeatable, see below). |
+
+### Finding the message in a larger blob
+
+Protobuf has no sync markers. A parse only works if it starts exactly on a
+field boundary, so guessing `--skip` values one at a time rarely lines up.
+When the start of your data looks wrong, run `pbre scan`:
+
+```
+$ pbre scan capture.bin
+capture.bin: 14072 bytes
+   #    start      end   lead  trail  fields  conf  preview
+   1       12    14068     12      4      28  1.00  1: "google/protobuf/"... (32 chars)  2: "google.protobuf"  ...
+   2       46    14068     46      4      27  1.00  2: "google.protobuf"  4: {3 fields}  4: {15 fields}  ...
+      (same as #1 without its first field)
+   ...
+  decode row N with: pbre decode --candidate N FILE
+```
+
+Each row is a span `[start, end)` that parses cleanly as a message: `lead`
+bytes are skipped before it and `trail` bytes ignored after it. `conf` is how
+plausible the bytes in the span look, from 0 to 1. Real messages score close
+to 1. Around 0.5 means the span is mostly opaque bytes fields, which is what
+random, compressed or encrypted data looks like, and pbre warns about it.
+pbre also points out gzip, zlib and zstd headers, gRPC frame headers and
+length prefixes it finds at the start of the input.
+
+`pbre decode --find-start` (or `pbre proto --find-start`) decodes the best
+candidate and prints the span it used to stderr. If the input already parses
+from its first byte, it is used unchanged, and `pbre scan` says so.
+`--candidate N` always decodes row N exactly as `pbre scan` listed it.
+
+**How it works.** A real message has to end exactly on a field boundary, so
+pbre works backwards from the end of the input. For every offset it parses the
+single field that would start there, if any, and follows those fields forward
+to see where the chain breaks. Each field is weighted by how plausible it
+looks: small field numbers, minimal varint encodings, payloads that are text
+or nested messages, and sensible fixed-width values score well. One
+right-to-left pass covers every offset, with a bounded amount of work per
+offset, so a scan is linear in the size of the input on any data (about 3
+seconds per MB). `--max-field-number` only affects whether a payload is
+judged to look like a nested message; it never rejects a field. Candidates are ranked by how many
+plausible-looking bytes they explain.
+
+**Limits.** A few junk bytes can form a perfectly valid field, for example
+`08 05` is "field 1 = 5". When they sit directly in front of the message, the
+best candidate may include them as an extra first field. That's why
+alternatives are listed, and labelled when they are the same parse minus its
+first fields. In tests with random junk prefixes of 1–24 bytes, the best
+candidate was exactly right about 75–90% of the time, and the true start was
+in the top three about 99% of the time. Real headers, with zero bytes, magic
+numbers or lengths, usually fail fast and do better.
+
+### Repairing data mangled by a text decode
+
+If your data contains the bytes `EF BF BD`, it was decoded as UTF-8 text and
+encoded again somewhere along the way. Typical culprits are `res.text()`,
+`r.text`, `new String(bytes, UTF_8)`, or copying bytes out of a console or
+log. `EF BF BD` is U+FFFD, the replacement character (�). Every byte that
+wasn't part of a valid UTF-8 sequence was swapped for those three bytes,
+which shifts every offset after it. `pbre scan` and pbre's error messages
+point this out when they see it.
+
+The real fix is to capture the raw bytes: `res.arrayBuffer()`, `r.content`,
+the `byte[]` itself, Base64 or hex in logs, or Wireshark's
+**Copy → …as Hex Stream**. When you can't, `--repair` recovers what's left:
+
+```
+$ pbre decode --repair capture.bin
+pbre: capture.bin: --repair: found 35 replacement characters (EF BF BD); assuming each stands for one lost byte
+pbre: capture.bin: --repair: 0 lost bytes recovered exactly, 1 chosen among alternatives, 34 still unknown
+  offset     1: 0xbe  guess    length of field 8 = 190 bytes; other lengths also parse (176, 172, ...): ...
+  offset    31: 0x??  unknown  value of fixed64 field 2
+  ...
+Message {
+  8 field_8: Field8 {  [1 lost byte: value uncertain]
+    1 field_1: Field1 {
+      1 field_1: string = "U"
+    ...
+      3 field_3: int64 = 1752406491136  [3 lost bytes: value uncertain]
+```
+
+**What it can recover.** Bytes below `0x80` are plain ASCII, so they always
+survive. That means every lost byte was `0x80` or higher, with its varint
+continuation bit set. The length of every varint, and so where every field
+starts and ends, can still be worked out; only 7 bits of value per lost byte
+are gone. `--repair` reads each `EF BF BD` as one such byte and searches for
+the field structure that best explains the whole buffer. Bytes the structure
+pins down, typically lengths, are filled in. Valid UTF-8 strings come through
+untouched.
+
+**What it can't.** The value bits of other lost bytes are gone: parts of
+large numbers, doubles, bytes fields, and sometimes the low bits of a field
+number. Those get a placeholder and are flagged as
+`[N lost bytes: value uncertain]` (or `"lost_bytes"` in JSON). Sometimes
+several lengths parse equally well, typically because the payload's last
+fields could equally belong to the outer message. pbre then picks the longest
+one, so the fields stay nested, marks it `guess` and lists the others.
+Rarely, one `EF BF BD` stands for two or three bytes (a truncated multi-byte
+sequence). If no consistent structure exists under the one-byte assumption,
+`--repair` says so and stops.
 
 ### Hints
 
@@ -230,5 +341,12 @@ byte for byte. One of the test inputs is descriptor.proto's own
   cannot be declared in a `.proto`. If they appear in the data, pbre leaves
   them out of the schema and adds a comment saying so; parsers keep them as
   unknown fields.
+* `pbre scan` and `--find-start` find one message per input (or per frame).
+  They can't split several concatenated messages that have no length prefixes,
+  because protobuf can't mark where one ends and the next begins.
 * Maps are emitted as repeated `FieldN` messages with fields 1 and 2. Wire
   compatibility is identical, so you can rewrite them as `map<K, V>` by hand.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
