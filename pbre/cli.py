@@ -12,7 +12,8 @@ from . import __version__
 from .decoder import DecodeOptions, decode
 from .inputs import decode_text_encoding, split_frames
 from .protogen import generate_proto
-from .render import render_text, to_json
+from .render import preview, render_text, to_json
+from .scan import LOW_CONFIDENCE, find_start, scan
 from .schema import infer_schema, parse_hint
 from .wire import MAX_FIELD_NUMBER, DecodeError
 
@@ -86,13 +87,38 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--json", action="store_true", help="emit JSON instead of text")
     d.add_argument("--proto", metavar="PATH", help="also write the inferred .proto to PATH ('-' for stdout)")
     d.add_argument("--no-prompt", action="store_true", help="never offer to generate a .proto")
+    _add_find_start(d)
     _add_proto_opts(d)
 
     p = sub.add_parser("proto", help="infer and print a .proto definition")
     _add_common(p)
     p.add_argument("-o", "--output", metavar="PATH", default="-", help="write to PATH (default: stdout)")
+    _add_find_start(p)
     _add_proto_opts(p)
+
+    s = sub.add_parser(
+        "scan",
+        help="find where a message starts and ends when the input has extra bytes around it",
+    )
+    _add_common(s)
+    s.add_argument("-n", "--top", type=int, default=5, help="number of candidates to show (default: 5)")
+    s.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     return parser
+
+
+def _add_find_start(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--find-start",
+        action="store_true",
+        help="if the input doesn't parse from its first byte, find the most plausible "
+        "start (and end) of the message and decode that span",
+    )
+    p.add_argument(
+        "--candidate",
+        type=int,
+        metavar="N",
+        help="like --find-start, but use candidate N from 'pbre scan' instead of the best one",
+    )
 
 
 def _add_proto_opts(p: argparse.ArgumentParser) -> None:
@@ -102,7 +128,13 @@ def _add_proto_opts(p: argparse.ArgumentParser) -> None:
 
 
 def _read_inputs(args) -> List[bytes]:
-    blobs: List[bytes] = []
+    return [blob for _, blob, _ in _read_inputs_located(args)]
+
+
+def _read_inputs_located(args):
+    """Yield (input name, blob, base offset) per message. The base offset is
+    where the blob starts in the decoded input, or None for framed input."""
+    out = []
     for path in args.files:
         if path == "-":
             data = sys.stdin.buffer.read()
@@ -118,10 +150,56 @@ def _read_inputs(args) -> List[bytes]:
         data = data[args.skip :]
         framing = "delimited" if args.delimited else "grpc" if args.grpc else "none"
         try:
-            blobs.extend(split_frames(data, framing))
+            frames = split_frames(data, framing)
         except DecodeError as e:
             raise SystemExit(f"pbre: {name}: {e}")
-    return blobs
+        base = args.skip if framing == "none" else None
+        out.extend((name, frame, base) for frame in frames)
+    return out
+
+
+def _span_note(c, base) -> str:
+    off = base or 0
+    text = f"bytes {off + c.start}..{off + c.end}"
+    extras = []
+    if c.leading:
+        extras.append(f"skipped {c.leading} leading")
+    if c.trailing:
+        extras.append(f"ignored {c.trailing} trailing")
+    if extras:
+        text += f" ({', '.join(extras)})"
+    return text
+
+
+def _locate(args, located):
+    """Apply --find-start to each blob."""
+    out = []
+    multi = len(located) > 1
+    for i, (name, blob, base) in enumerate(located):
+        label = f"{name} message {i + 1}" if multi else name
+        rank = args.candidate or 1
+        if args.candidate is not None and args.candidate < 1:
+            raise SystemExit("pbre: --candidate must be 1 or more")
+        if args.candidate is None:
+            c = find_start(blob, args.max_field_number)
+        else:
+            cands = scan(blob, top=rank, max_field_number=args.max_field_number).candidates
+            c = cands[rank - 1] if len(cands) >= rank else None
+        if c is None:
+            raise SystemExit(
+                f"pbre: {label}: --find-start found no plausible message"
+                + ("" if args.candidate is None else f" (no candidate {rank})")
+            )
+        if c.leading or c.trailing:
+            print(f"pbre: {label}: using {_span_note(c, base)}", file=sys.stderr)
+            if c.confidence < LOW_CONFIDENCE:
+                print(
+                    f"pbre: {label}: warning: low confidence ({c.confidence:.2f}); "
+                    "the data may be compressed or encrypted. See 'pbre scan'.",
+                    file=sys.stderr,
+                )
+        out.append(blob[c.start : c.end])
+    return out
 
 
 def _analyze(args):
@@ -138,9 +216,13 @@ def _analyze(args):
         if hint.name and not _IDENT.match(hint.name):
             raise SystemExit(f"pbre: invalid name in hint {spec!r}")
         hints[path] = hint
-    blobs = _read_inputs(args)
-    if not blobs:
+    located = _read_inputs_located(args)
+    if not located:
         raise SystemExit("pbre: no input")
+    if getattr(args, "find_start", False) or getattr(args, "candidate", None) is not None:
+        blobs = _locate(args, located)
+    else:
+        blobs = [blob for _, blob, _ in located]
     options = DecodeOptions(max_field_number=args.max_field_number)
     decoded = []
     for i, blob in enumerate(blobs):
@@ -150,7 +232,8 @@ def _analyze(args):
             label = f"message {i + 1}" if len(blobs) > 1 else "input"
             raise SystemExit(
                 f"pbre: {label} is not a valid protobuf message: {e}\n"
-                "hint: try --format hex/base64, --skip N, --delimited or --grpc"
+                "hint: try --find-start (or 'pbre scan' to see candidates), "
+                "--format hex/base64, --skip N, --delimited or --grpc"
             )
     schema = infer_schema(decoded, args.message_name, hints)
     return decoded, schema
@@ -224,6 +307,83 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def cmd_scan(args) -> int:
+    located = _read_inputs_located(args)
+    if not located:
+        raise SystemExit("pbre: no input")
+    if args.top < 1:
+        raise SystemExit("pbre: --top must be 1 or more")
+    options = DecodeOptions(max_field_number=args.max_field_number)
+    reports = []
+    for i, (name, blob, base) in enumerate(located):
+        label = f"{name} message {i + 1}" if len(located) > 1 else name
+        result = scan(blob, top=args.top, max_field_number=args.max_field_number)
+        off = base or 0
+        rows = []
+        for rank, c in enumerate(result.candidates, 1):
+            nodes = decode(blob[c.start : c.end], options)
+            schema = infer_schema([nodes], args.message_name)
+            rows.append((rank, c, preview(nodes, schema)))
+        reports.append((label, blob, base, result, rows))
+        if args.json:
+            continue
+        print(f"{label}: {len(blob)} bytes" + (f" (offsets include --skip {args.skip})" if args.skip and base is not None else ""))
+        for h in result.hints:
+            print(f"  hint: {h}")
+        if not rows:
+            print("  no plausible message found")
+            continue
+        print(f"  {'#':>2}  {'start':>7}  {'end':>7}  {'lead':>5}  {'trail':>5}  {'fields':>6}  {'conf':>4}  preview")
+        for rank, c, pv in rows:
+            print(
+                f"  {rank:>2}  {off + c.start:>7}  {off + c.end:>7}  {c.leading:>5}  {c.trailing:>5}"
+                f"  {c.fields:>6}  {c.confidence:>4.2f}  {pv}"
+            )
+            if c.same_as:
+                n = c.dropped_fields
+                what = "first field" if n == 1 else f"first {n} fields"
+                print(f"  {'':>2}  (same as #{c.same_as} without its {what})")
+        best = result.best
+        if best.confidence < LOW_CONFIDENCE:
+            print(
+                f"  warning: low confidence ({best.confidence:.2f}): the best span is mostly opaque "
+                "bytes; the data may be compressed, encrypted or not protobuf"
+            )
+        if best.leading or best.trailing:
+            print("  decode the best candidate with: pbre decode --find-start FILE")
+            if len(rows) > 1:
+                print("  or pick another with:          pbre decode --candidate N FILE")
+    if args.json:
+        payload = []
+        for label, blob, base, result, rows in reports:
+            off = base or 0
+            payload.append(
+                {
+                    "input": label,
+                    "length": len(blob),
+                    "hints": result.hints,
+                    "candidates": [
+                        {
+                            "rank": rank,
+                            "start": off + c.start,
+                            "end": off + c.end,
+                            "leading": c.leading,
+                            "trailing": c.trailing,
+                            "fields": c.fields,
+                            "confidence": round(c.confidence, 3),
+                            "same_as": c.same_as,
+                            "dropped_fields": c.dropped_fields if c.same_as else 0,
+                            "preview": pv,
+                        }
+                        for rank, c, pv in rows
+                    ],
+                }
+            )
+        json.dump(payload[0] if len(payload) == 1 else payload, sys.stdout, indent=2, ensure_ascii=False)
+        sys.stdout.write("\n")
+    return 0
+
+
 def cmd_proto(args) -> int:
     decoded, schema = _analyze(args)
     _write(args.output, _proto_text(args, schema, len(decoded)))
@@ -233,13 +393,15 @@ def cmd_proto(args) -> int:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     # `pbre FILE` is shorthand for `pbre decode FILE`.
-    if not argv or argv[0] not in ("decode", "proto", "-h", "--help", "--version"):
+    if not argv or argv[0] not in ("decode", "proto", "scan", "-h", "--help", "--version"):
         argv.insert(0, "decode")
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
         if args.command == "proto":
             return cmd_proto(args)
+        if args.command == "scan":
+            return cmd_scan(args)
         return cmd_decode(args)
     except BrokenPipeError:
         return 0

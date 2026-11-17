@@ -95,6 +95,7 @@ release.
 ```
 pbre [decode] FILE...  [options]     # show the decoded fields (default command)
 pbre proto    FILE...  [options]     # print or write the inferred .proto
+pbre scan     FILE...  [options]     # find where a message starts/ends in a larger blob
 ```
 
 When you don't pass a file, or pass `-`, pbre reads standard input. If several
@@ -111,6 +112,8 @@ that happens to be empty in one sample is still recognised as a string.
 | `--delimited` | Input is a stream of varint-length-prefixed messages, as written by `writeDelimitedTo`. Each message is one sample. |
 | `--grpc` | Input is gRPC-framed: each message has a 5-byte prefix. Compressed frames are not supported. |
 | `--skip N` | Skip N leading bytes, for example a custom header. |
+| `--find-start` | (`decode`, `proto`) If the input doesn't parse from its first byte, find the most plausible start and end of the message and decode only that span. See [Finding the message in a larger blob](#finding-the-message-in-a-larger-blob). |
+| `--candidate N` | (`decode`, `proto`) Like `--find-start`, but use candidate N from `pbre scan` instead of the best one. |
 | `--max-field-number N` | Don't read a payload as a nested message if it uses field numbers above N. Lowering this cuts down on binary blobs being mistaken for messages. |
 
 ### Decode options
@@ -131,6 +134,56 @@ that happens to be empty in one sample is still recognised as a string.
 | `--syntax proto2\|proto3` | Defaults to proto3. pbre switches to proto2 automatically if the data contains groups. |
 | `--no-comments` | Leave out sample values and inference notes. |
 | `-H, --hint PATH=TYPE[:NAME]` | Override the inferred type and/or name of a field (repeatable, see below). |
+
+### Finding the message in a larger blob
+
+Protobuf has no sync markers. A parse only works if it starts exactly on a
+field boundary, so guessing `--skip` values one at a time rarely lines up.
+When the start of your data looks wrong, run `pbre scan`:
+
+```
+$ pbre scan capture.bin
+capture.bin: 14072 bytes
+   #    start      end   lead  trail  fields  conf  preview
+   1       12    14068     12      4      28  1.00  1: "google/protobuf/"... (32 chars)  2: "google.protobuf"  ...
+   2       46    14068     46      4      27  1.00  2: "google.protobuf"  4: {3 fields}  4: {15 fields}  ...
+      (same as #1 without its first field)
+   ...
+  decode the best candidate with: pbre decode --find-start FILE
+  or pick another with:          pbre decode --candidate N FILE
+```
+
+Each row is a span `[start, end)` that parses cleanly as a message: `lead`
+bytes are skipped before it and `trail` bytes ignored after it. `conf` is how
+plausible the bytes in the span look, from 0 to 1. Real messages score close
+to 1. Around 0.5 means the span is mostly opaque bytes fields, which is what
+random, compressed or encrypted data looks like, and pbre warns about it.
+pbre also points out gzip, zlib and zstd headers, gRPC frame headers and
+length prefixes it finds at the start of the input.
+
+`pbre decode --find-start` (or `pbre proto --find-start`) decodes the best
+candidate and prints the span it used to stderr. If the input already parses
+from its first byte, it is used unchanged. `--candidate N` picks another row
+instead.
+
+**How it works.** A real message has to end exactly on a field boundary, so
+pbre works backwards from the end of the input. For every offset it parses the
+single field that would start there, if any, and follows those fields forward
+to see where the chain breaks. Each field is weighted by how plausible it
+looks: small field numbers, minimal varint encodings, payloads that are text
+or nested messages, and sensible fixed-width values score well. One
+right-to-left pass covers every offset, so a scan is linear in the size of the
+input (about 3 seconds per MB). Candidates are ranked by how many
+plausible-looking bytes they explain.
+
+**Limits.** A few junk bytes can form a perfectly valid field, for example
+`08 05` is "field 1 = 5". When they sit directly in front of the message, the
+best candidate may include them as an extra first field. That's why
+alternatives are listed, and labelled when they are the same parse minus its
+first fields. In tests with random junk prefixes of 1–24 bytes, the best
+candidate was exactly right about 75–90% of the time, and the true start was
+in the top three about 97% of the time. Real headers, with zero bytes, magic
+numbers or lengths, usually fail fast and do better.
 
 ### Hints
 
@@ -230,5 +283,8 @@ byte for byte. One of the test inputs is descriptor.proto's own
   cannot be declared in a `.proto`. If they appear in the data, pbre leaves
   them out of the schema and adds a comment saying so; parsers keep them as
   unknown fields.
+* `pbre scan` and `--find-start` find one message per input (or per frame).
+  They can't split several concatenated messages that have no length prefixes,
+  because protobuf can't mark where one ends and the next begins.
 * Maps are emitted as repeated `FieldN` messages with fields 1 and 2. Wire
   compatibility is identical, so you can rewrite them as `map<K, V>` by hand.

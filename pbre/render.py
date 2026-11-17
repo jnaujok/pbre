@@ -169,3 +169,30 @@ def _json_scalar(type_name: str, v: int):
         d = as_float(v) if type_name == "float" else as_double(v)
         return d if d == d and d not in (float("inf"), float("-inf")) else s
     return int(s)
+
+
+def preview(nodes: List[Node], schema: MessageSchema, max_fields: int = 4, width: int = 70) -> str:
+    """A one-line summary of the first few top-level fields."""
+    parts = []
+    for n in nodes[:max_fields]:
+        f = schema.fields.get(n.number)
+        if not _matches(n, f):
+            parts.append(f"{n.number}: <{_WIRE_NAMES[n.wire_type]}>")
+            continue
+        assert f is not None
+        if f.type in ("message", "group"):
+            k = len(n.children or [])
+            parts.append(f"{n.number}: {{{k} field{'s' if k != 1 else ''}}}")
+        elif f.is_scalar:
+            if n.is_len:
+                parts.append(f"{n.number}: [packed {f.type}]")
+            else:
+                parts.append(f"{n.number}: {format_scalar(f.type, n.value)}")
+        else:
+            parts.append(f"{n.number}: {format_len(f.type, n.value, 16)}")
+    if len(nodes) > max_fields:
+        parts.append("...")
+    text = "  ".join(parts)
+    if len(text) > width:
+        text = text[: width - 3] + "..."
+    return text
