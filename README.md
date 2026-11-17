@@ -65,6 +65,22 @@ also run it with `poetry run python -m pbre ...`.
 Every CI run also builds the wheel and sdist and keeps them as a
 downloadable `pbre-dist` artifact on the workflow run's page in the Actions tab.
 
+### Releases
+
+Tagged versions are published on the repository's
+[Releases page](https://github.com/jnaujok/pbre/releases) with the wheel and
+sdist attached, so they can be downloaded without a GitHub login and don't
+expire. To cut a release, bump the version, merge to `main`, then tag it:
+
+```
+poetry version patch      # or minor / major; commit and merge this change
+git tag v$(poetry version --short)
+git push origin v$(poetry version --short)
+```
+
+The release workflow refuses a tag that doesn't match the version in
+`pyproject.toml`, runs the tests, builds the package and creates the release.
+
 ## Usage
 
 ```
@@ -129,7 +145,9 @@ A scalar type hint on a length-delimited field (like `9=int32` above) means
 
 `PATH` is a dot-separated list of field numbers from the top-level message,
 so `4.1` means field 1 inside the message in field 4. `TYPE` can be any
-protobuf scalar type, `string`, `bytes`, `message` or `group`. pbre ignores a
+protobuf scalar type, `string`, `bytes`, `message` or `group`. `enum` isn't
+accepted, because pbre can't generate the named enum type such a field needs;
+use `int32` and turn it into an enum by hand. pbre ignores a
 hint that contradicts the data (for example `message` on a payload that
 doesn't parse as one) and says so in a comment in the `.proto`.
 
@@ -150,9 +168,14 @@ doesn't parse as one) and says so in a comment in the `.proto`.
    `float`/`double` when every value is a plausible number, and otherwise
    `fixed`/`sfixed`. A field seen more than once in one message becomes
    `repeated`. pbre also records whether repeated scalars were packed, and
-   whether zero or empty values were explicitly present, so that the
-   generated schema re-serializes the input **byte for byte**. To do this it
-   emits `[packed = false]` and proto3 `optional` where needed.
+   whether zero or empty values were explicitly present, and emits
+   `[packed = false]` and proto3 `optional` where needed. For input written by
+   a standard protobuf library, this means the generated schema re-serializes
+   the data **byte for byte**. That can't hold for input a standard library
+   wouldn't produce, such as a field sent both packed and unpacked, fields
+   out of number order, or overlong varints. The schema still decodes such
+   input, but re-encoding normalizes it; pbre adds a note for the mixed
+   packed/unpacked case.
 4. **Rendering.** The tree view and JSON output use the inferred schema, so
    every occurrence of a field is shown the same way. Where pbre is unsure, it
    notes this in the output and in the `.proto`: for example, a `bytes` field
@@ -194,5 +217,9 @@ byte for byte. One of the test inputs is descriptor.proto's own
   `--max-field-number` resolve this.
 * Recursive types (a message that contains itself) are emitted as separate
   nested copies rather than one self-referencing type.
+* Field numbers 19000–19999 are reserved for the protobuf implementation and
+  cannot be declared in a `.proto`. If they appear in the data, pbre leaves
+  them out of the schema and adds a comment saying so; parsers keep them as
+  unknown fields.
 * Maps are emitted as repeated `FieldN` messages with fields 1 and 2. Wire
   compatibility is identical, so you can rewrite them as `map<K, V>` by hand.

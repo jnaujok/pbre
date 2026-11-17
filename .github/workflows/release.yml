@@ -1,0 +1,32 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write  # needed to create the release and upload files to it
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.13"
+      - run: pipx install poetry
+      - name: Check the tag matches the package version
+        run: |
+          version="$(poetry version --short)"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${version} (expected v${version})"
+            exit 1
+          fi
+      - run: poetry env use "$(which python)"
+      - run: poetry install
+      - run: poetry run pytest -q
+      - run: poetry build
+      - name: Create the GitHub Release with the wheel and sdist attached
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "pbre ${GITHUB_REF_NAME}" --generate-notes --verify-tag

@@ -70,7 +70,9 @@ def is_printable_text(s: str) -> bool:
 def decode(buf: bytes, options: DecodeOptions | None = None) -> List[Node]:
     """Decode a complete message. Raises DecodeError if ``buf`` is not one."""
     options = options or DecodeOptions()
-    raw = parse_message(buf, max_field_number=options.max_field_number)
+    # The top level is known to be a message, so only the protocol's own limit
+    # applies; options.max_field_number only guards speculative nested parses.
+    raw = parse_message(buf)
     return _convert(raw, options, 0, 0)
 
 
