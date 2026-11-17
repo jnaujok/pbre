@@ -5,8 +5,9 @@ from __future__ import annotations
 from typing import List, Optional
 
 from .schema import FieldSchema, MessageSchema, SCALAR_TYPES
+from .wire import RESERVED_RANGE
 
-PACKABLE = SCALAR_TYPES - {"enum"}
+PACKABLE = SCALAR_TYPES
 
 
 def generate_proto(
@@ -54,6 +55,14 @@ def _emit_body(msg: MessageSchema, lines, depth, syntax, comments):
     ind = "  " * depth
     nested: List[MessageSchema] = []
     for f in msg.sorted_fields():
+        if f.number in RESERVED_RANGE:
+            # protoc refuses to declare these numbers. Leave the field out so
+            # the file still compiles; parsers keep it as an unknown field.
+            lines.append(
+                f"{ind}// field {f.number} omitted: 19000-19999 is reserved for the "
+                "protobuf implementation and cannot be declared"
+            )
+            continue
         if comments:
             for note in f.notes:
                 lines.append(f"{ind}// {note}")

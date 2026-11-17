@@ -22,7 +22,9 @@ from .decoder import (
 )
 from .wire import DecodeError, WireType
 
-VARINT_TYPES = {"int32", "int64", "uint32", "uint64", "sint32", "sint64", "bool", "enum"}
+# "enum" is deliberately absent: pbre cannot generate the named enum type a
+# field would need, and a bare "enum" is not a valid field type.
+VARINT_TYPES = {"int32", "int64", "uint32", "uint64", "sint32", "sint64", "bool"}
 FIXED32_TYPES = {"fixed32", "sfixed32", "float"}
 FIXED64_TYPES = {"fixed64", "sfixed64", "double"}
 SCALAR_TYPES = VARINT_TYPES | FIXED32_TYPES | FIXED64_TYPES
@@ -169,6 +171,10 @@ def _infer_field(number, occ, path, hints) -> FieldSchema:
         fs.repeated = True
         _infer_scalar(fs, nodes, scalar_classes[0], hint)
         fs.packed = classes["len"] >= classes[scalar_classes[0]]
+        fs.notes.append(
+            "seen both packed and unpacked; the schema decodes both, but "
+            "re-serializing will use one encoding, so the bytes will differ"
+        )
         return fs
 
     if len(classes) > 1:
@@ -346,13 +352,19 @@ def _snake(name: str) -> str:
 # --------------------------------------------------------------------------
 
 def format_scalar(type_name: str, v: int) -> str:
-    if type_name in ("int32", "int64", "enum"):
+    # Like the protobuf runtimes, 32-bit types use only the low 32 bits.
+    if type_name == "int32":
+        return str(to_signed(v & 0xFFFFFFFF, 32))
+    if type_name == "int64":
         return str(to_signed(v, 64))
     if type_name == "uint32":
         return str(v & 0xFFFFFFFF)
     if type_name == "uint64" or type_name in ("fixed32", "fixed64"):
         return str(v)
-    if type_name in ("sint32", "sint64"):
+    if type_name == "sint32":
+        v &= 0xFFFFFFFF
+        return str((v >> 1) ^ -(v & 1))
+    if type_name == "sint64":
         return str((v >> 1) ^ -(v & 1))
     if type_name == "bool":
         return "true" if v else "false"

@@ -11,7 +11,9 @@ from enum import IntEnum
 from typing import List, Tuple, Union
 
 MAX_FIELD_NUMBER = (1 << 29) - 1
-RESERVED_RANGE = range(19000, 20000)  # reserved for the protobuf implementation
+# Field numbers reserved for the protobuf implementation; a .proto may not
+# declare them, though they can appear on the wire.
+RESERVED_RANGE = range(19000, 20000)
 
 
 class WireType(IntEnum):
@@ -69,6 +71,9 @@ def read_varint(buf: bytes, pos: int, end: int | None = None) -> Tuple[int, int]
 
 
 def encode_varint(value: int) -> bytes:
+    """Encode an int64 or uint64 value as a varint."""
+    if not -(1 << 63) <= value < (1 << 64):
+        raise ValueError(f"{value} is outside the int64/uint64 range")
     if value < 0:
         value += 1 << 64
     out = bytearray()
