@@ -149,8 +149,7 @@ capture.bin: 14072 bytes
    2       46    14068     46      4      27  1.00  2: "google.protobuf"  4: {3 fields}  4: {15 fields}  ...
       (same as #1 without its first field)
    ...
-  decode the best candidate with: pbre decode --find-start FILE
-  or pick another with:          pbre decode --candidate N FILE
+  decode row N with: pbre decode --candidate N FILE
 ```
 
 Each row is a span `[start, end)` that parses cleanly as a message: `lead`
@@ -163,8 +162,8 @@ length prefixes it finds at the start of the input.
 
 `pbre decode --find-start` (or `pbre proto --find-start`) decodes the best
 candidate and prints the span it used to stderr. If the input already parses
-from its first byte, it is used unchanged. `--candidate N` picks another row
-instead.
+from its first byte, it is used unchanged, and `pbre scan` says so.
+`--candidate N` always decodes row N exactly as `pbre scan` listed it.
 
 **How it works.** A real message has to end exactly on a field boundary, so
 pbre works backwards from the end of the input. For every offset it parses the
@@ -172,8 +171,10 @@ single field that would start there, if any, and follows those fields forward
 to see where the chain breaks. Each field is weighted by how plausible it
 looks: small field numbers, minimal varint encodings, payloads that are text
 or nested messages, and sensible fixed-width values score well. One
-right-to-left pass covers every offset, so a scan is linear in the size of the
-input (about 3 seconds per MB). Candidates are ranked by how many
+right-to-left pass covers every offset, with a bounded amount of work per
+offset, so a scan is linear in the size of the input on any data (about 3
+seconds per MB). `--max-field-number` only affects whether a payload is
+judged to look like a nested message; it never rejects a field. Candidates are ranked by how many
 plausible-looking bytes they explain.
 
 **Limits.** A few junk bytes can form a perfectly valid field, for example
@@ -182,7 +183,7 @@ best candidate may include them as an extra first field. That's why
 alternatives are listed, and labelled when they are the same parse minus its
 first fields. In tests with random junk prefixes of 1–24 bytes, the best
 candidate was exactly right about 75–90% of the time, and the true start was
-in the top three about 97% of the time. Real headers, with zero bytes, magic
+in the top three about 99% of the time. Real headers, with zero bytes, magic
 numbers or lengths, usually fail fast and do better.
 
 ### Hints

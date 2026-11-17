@@ -15,7 +15,7 @@ from .protogen import generate_proto
 from .render import preview, render_text, to_json
 from .scan import LOW_CONFIDENCE, find_start, scan
 from .schema import infer_schema, parse_hint
-from .wire import MAX_FIELD_NUMBER, DecodeError
+from .wire import MAX_FIELD_NUMBER, DecodeError, parse_message
 
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _PACKAGE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$")
@@ -307,6 +307,14 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _parses_whole(blob: bytes) -> bool:
+    try:
+        parse_message(blob)
+        return True
+    except DecodeError:
+        return False
+
+
 def cmd_scan(args) -> int:
     located = _read_inputs_located(args)
     if not located:
@@ -349,10 +357,10 @@ def cmd_scan(args) -> int:
                 f"  warning: low confidence ({best.confidence:.2f}): the best span is mostly opaque "
                 "bytes; the data may be compressed, encrypted or not protobuf"
             )
-        if best.leading or best.trailing:
-            print("  decode the best candidate with: pbre decode --find-start FILE")
-            if len(rows) > 1:
-                print("  or pick another with:          pbre decode --candidate N FILE")
+        if _parses_whole(blob):
+            print("  the whole input already parses as a message; --find-start uses it unchanged")
+        if best.leading or best.trailing or len(rows) > 1:
+            print("  decode row N with: pbre decode --candidate N FILE")
     if args.json:
         payload = []
         for label, blob, base, result, rows in reports:

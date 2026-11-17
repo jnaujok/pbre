@@ -19,6 +19,7 @@ ranked by how much plausible-looking data they explain.
 
 from __future__ import annotations
 
+import codecs
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
 
@@ -35,9 +36,13 @@ from .wire import (
 # Below this confidence, a candidate is probably not a real message.
 LOW_CONFIDENCE = 0.75
 
-# How far to follow a chain when checking whether a group or a nested payload
-# is well formed. Bounds the cost of a scan on pathological input.
-_MAX_WALK = 4096
+# How many records to follow when judging whether a payload looks like a
+# nested message, and how many bytes of a payload to check for text. Both
+# bound the work per offset, so a scan stays linear on any input.
+_MAX_WALK = 32
+_TEXT_SAMPLE = 64
+# The decoder rejects groups nested deeper than this (see wire._parse).
+_MAX_GROUP_DEPTH = 100
 # Bonus, as a fraction of the input length, for a span that runs exactly to
 # the end of the input (no trailing bytes).
 _CLEAN_END_BONUS = 0.02
@@ -130,67 +135,91 @@ def _field_number_score(number: int) -> float:
 
 
 class _Scanner:
+    """One right-to-left pass over ``buf``. Every quantity for offset ``k``
+    depends only on offsets greater than ``k``, and each offset does a
+    bounded amount of work, so the whole scan is linear in ``len(buf)``."""
+
     def __init__(self, buf: bytes, max_field_number: int):
         self.buf = buf
         self.n = len(buf)
-        self.max_field_number = max_field_number
+        # Only used to judge whether a payload looks like a nested message;
+        # top-level records are validated like the decoder does.
+        self.nested_max_field = max_field_number
         n = self.n
-        # Per-offset record info: end offset (or -1 if no record), kind, number.
-        self.rec_end = [-1] * (n + 1)
-        self.rec_kind: List[Optional[str]] = [None] * (n + 1)
-        self.rec_num = [0] * (n + 1)
-        self.rec_score = [0.0] * (n + 1)
+        size = n + 1
+        # Per-offset record info. rec_end is -1 where no record starts.
+        self.rec_end = [-1] * size
+        self.rec_kind: List[Optional[str]] = [None] * size
+        self.rec_num = [0] * size
+        self.rec_score = [0.0] * size
+        # Group bookkeeping: next_egroup[p] is the first end-group tag on the
+        # chain from p (-1 if the chain breaks first); chain_depth[p] is the
+        # deepest group nesting on the chain from p up to that point.
+        self.next_egroup = [-1] * size
+        self.chain_depth = [0] * size
         # Chain info.
-        self.stop = list(range(n + 1))
-        self.total = [0.0] * (n + 1)
-        self.count = [0] * (n + 1)
+        self.stop = list(range(size))
+        self.total = [0.0] * size
+        self.count = [0] * size
 
     def run(self) -> None:
-        n = self.n
-        for k in range(n - 1, -1, -1):
-            self._record(k)
+        for k in range(self.n - 1, -1, -1):
+            depth = self._record(k)
             end = self.rec_end[k]
-            if end > k and self.rec_kind[k] != _EGROUP:
+            kind = self.rec_kind[k]
+            if kind == _EGROUP:
+                self.next_egroup[k] = k
+            elif end > k:
                 self.stop[k] = self.stop[end]
                 self.total[k] = self.rec_score[k] + self.total[end]
                 self.count[k] = 1 + self.count[end]
+                self.next_egroup[k] = self.next_egroup[end]
+                self.chain_depth[k] = max(depth, self.chain_depth[end])
 
-    def _walk_to(self, pos: int, limit: int, group: Optional[int]) -> Optional[int]:
-        """Follow records from ``pos``. For a group, return the offset just
-        past its matching end-group tag; otherwise return ``pos`` if the
-        records land exactly on ``limit``. None if neither happens."""
+    def _looks_like_message(self, pos: int, limit: int) -> bool:
+        """Do the records from ``pos`` land exactly on ``limit``? Follows at
+        most _MAX_WALK records, then falls back to "the chain gets at least
+        that far", which is cheap and usually right."""
         steps = 0
-        while pos < limit and steps < _MAX_WALK:
+        while pos < limit:
             end = self.rec_end[pos]
-            if end <= pos or end > limit:
-                return None
-            if self.rec_kind[pos] == _EGROUP:
-                return end if group is not None and self.rec_num[pos] == group else None
+            if end <= pos or end > limit or self.rec_kind[pos] == _EGROUP:
+                return False
+            if self.rec_num[pos] > self.nested_max_field:
+                return False
             pos = end
             steps += 1
-        if group is None and pos == limit:
-            return pos
-        return None
+            if steps >= _MAX_WALK:
+                return self.stop[pos] >= limit
+        return pos == limit
 
-    def _record(self, k: int) -> None:
+    def _record(self, k: int) -> int:
+        """Fill in the record starting at ``k``; return its group depth."""
         buf, n = self.buf, self.n
         tag = _read_varint(buf, k, n)
         if tag is None:
-            return
+            return 0
         value, pos = tag
         number, wt = value >> 3, value & 7
-        if number == 0 or number > self.max_field_number or wt > 5:
-            return
+        # Same validity rules as the decoder (wire.parse_message).
+        if number == 0 or number > MAX_FIELD_NUMBER or wt > 5:
+            return 0
+        if wt == WireType.EGROUP:  # only valid as the terminator of a group
+            self.rec_end[k] = pos
+            self.rec_kind[k] = _EGROUP
+            self.rec_num[k] = number
+            return 0
         # Plausibility multiplier for this record; its score is this times the
         # number of bytes it covers, so a start is ranked by how many
         # plausible-looking bytes it explains.
         score = 1.0 + _field_number_score(number)
         if not _canonical(value, pos - k):
             score -= 2.0
+        depth = 0
         if wt == WireType.VARINT:
             v = _read_varint(buf, pos, n)
             if v is None:
-                return
+                return 0
             val, end = v
             if not _canonical(val, end - pos):
                 score -= 2.0
@@ -198,45 +227,54 @@ class _Scanner:
             width = 8 if wt == WireType.I64 else 4
             end = pos + width
             if end > n:
-                return
+                return 0
             if not _plausible_fixed(int.from_bytes(buf[pos:end], "little"), width):
                 score -= 1.0
         elif wt == WireType.LEN:
             ln = _read_varint(buf, pos, n)
             if ln is None:
-                return
+                return 0
             length, data = ln
             if not _canonical(length, data - pos):
                 score -= 2.0
             end = data + length
             if end > n:
-                return
-            if length:
-                payload = buf[data:end]
-                plausible = self._walk_to(data, end, None) == end
-                if not plausible:
-                    try:
-                        plausible = is_printable_text(payload.decode("utf-8"))
-                    except UnicodeDecodeError:
-                        pass
-                if not plausible:
-                    score -= 0.5  # opaque bytes: possible, but weak evidence
-        elif wt == WireType.SGROUP:
-            end = self._walk_to(pos, n, number)
-            if end is None:
-                return
+                return 0
+            if length and not (
+                _looks_like_text(buf, data, end) or self._looks_like_message(data, end)
+            ):
+                score -= 0.5  # opaque bytes: possible, but weak evidence
+        else:  # SGROUP
+            # The group ends at the first end-group tag on the chain from its
+            # content; inner groups are skipped over because their records
+            # jump past their own end-group tags.
+            eg = self.next_egroup[pos] if pos <= n else -1
+            if eg < 0 or self.rec_num[eg] != number:
+                return 0
+            depth = 1 + self.chain_depth[pos]
+            if depth > _MAX_GROUP_DEPTH:
+                return 0
+            end = self.rec_end[eg]
             score -= 0.5  # groups are rare in modern data
-        else:  # EGROUP: only valid as the terminator of a group
-            self.rec_end[k] = pos
-            self.rec_kind[k] = _EGROUP
-            self.rec_num[k] = number
-            return
-        if end > n:
-            return
         self.rec_end[k] = end
         self.rec_kind[k] = "field"
         self.rec_num[k] = number
         self.rec_score[k] = max(score, -1.0) * (end - k)
+        return depth
+
+
+def _looks_like_text(buf: bytes, start: int, end: int) -> bool:
+    """Is the payload printable UTF-8? Only the first _TEXT_SAMPLE bytes are
+    checked, so the cost per record is bounded."""
+    sample = buf[start : min(end, start + _TEXT_SAMPLE)]
+    decoder = codecs.getincrementaldecoder("utf-8")()
+    try:
+        # final only when the sample is the whole payload, so a multi-byte
+        # character cut off at the sample boundary doesn't count against it
+        text = decoder.decode(sample, final=end - start <= _TEXT_SAMPLE)
+    except UnicodeDecodeError:
+        return False
+    return is_printable_text(text)
 
 
 def _detect_hints(buf: bytes) -> List[str]:

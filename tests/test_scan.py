@@ -125,7 +125,8 @@ def test_cli_scan(tmp_path, capsys):
     lines = out.splitlines()
     assert lines[2].split()[:6] == ["1", "5", "22", "5", "2", "3"]
     assert '2: "testing"' in lines[2]
-    assert "pbre decode --find-start FILE" in out
+    assert "pbre decode --candidate N FILE" in out
+    assert "already parses" not in out
 
 
 def test_cli_scan_json_and_skip_offsets(tmp_path, capsys):
@@ -178,3 +179,42 @@ def test_cli_low_confidence_warning(tmp_path, capsys):
     p.write_bytes(bytes(rng.randrange(256) for _ in range(20000)))
     rc, out, _ = run(capsys, "scan", str(p))
     assert "low confidence" in out
+
+
+# --- regressions from review ----------------------------------------------
+
+
+def test_scan_is_linear_on_overlapping_length_headers():
+    """Every offset declares a huge payload; each must cost O(1), not a copy."""
+    import time
+
+    blob = b"\x0a\x80\x80\x20" * (1 << 18)  # 1 MiB, 512 KiB payloads
+    t = time.perf_counter()
+    scan(blob)
+    assert time.perf_counter() - t < 15  # was ~30 s when payloads were copied
+
+
+def test_group_depth_limit_matches_decoder():
+    too_deep = b"\xff" + b"\x0b" * 102 + b"\x10\x05" + b"\x0c" * 102
+    for c in scan(too_deep).candidates:
+        decode(too_deep[c.start : c.end])  # every candidate must decode
+    ok = b"\xff" + b"\x0b" * 100 + b"\x10\x05" + b"\x0c" * 100
+    c = find_start(ok)
+    assert (c.start, c.end) == (1, len(ok))
+    decode(ok[c.start : c.end])
+
+
+def test_max_field_number_only_limits_nested_guesses():
+    blob = b"\xff\x58\x01\x08\x07"  # junk, then field 11 = 1, field 1 = 7
+    c = find_start(blob, max_field_number=10)
+    assert (c.start, c.end) == (1, 5)
+
+
+def test_cli_scan_on_valid_input_explains_find_start(tmp_path, capsys):
+    p = tmp_path / "m.bin"
+    p.write_bytes(b"\x88\x00\x01\x10\x05")  # valid, but row 1 is a later span
+    rc, out, _ = run(capsys, "scan", str(p))
+    assert "already parses" in out
+    assert "--candidate N" in out
+    rc, out, err = run(capsys, "decode", "--candidate", "1", str(p), "--no-prompt")
+    assert "using bytes 3..5" in err
