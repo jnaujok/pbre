@@ -1,7 +1,3 @@
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
-
 [project]
 name = "pbre"
 version = "0.1.0"
@@ -10,14 +6,20 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = []
 
-[project.optional-dependencies]
-test = ["pytest", "protobuf", "grpcio-tools"]
-
 [project.scripts]
 pbre = "pbre.cli:main"
 
-[tool.setuptools]
-packages = ["pbre"]
+[tool.poetry]
+packages = [{ include = "pbre" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8"
+protobuf = ">=5"
+grpcio-tools = ">=1.60"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

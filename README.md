@@ -51,12 +51,16 @@ message Message {
 
 ## Install
 
+pbre uses [Poetry](https://python-poetry.org/) and requires Python 3.12 or later.
+
 ```
-pip install .            # or: pip install -e '.[test]' for development
+poetry install           # creates a virtualenv with pbre and the dev/test tools
+poetry run pbre --help
 ```
 
-Requires Python 3.12 or later. You can also run it without installing:
-`python -m pbre ...`
+To install the command for everyday use, run `poetry build` and then
+`pipx install dist/pbre-*.whl` (or `pip install .`). From a checkout you can
+also run it with `poetry run python -m pbre ...`.
 
 ## Usage
 
@@ -166,8 +170,8 @@ print(generate_proto(schema, package="recovered"))
 ## Tests
 
 ```
-pip install -e '.[test]'
-pytest
+poetry install
+poetry run pytest
 ```
 
 The tests serialize real messages with the official protobuf runtime, run pbre
