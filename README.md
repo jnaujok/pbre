@@ -1,5 +1,11 @@
 # pbre
 
+[![tests](https://github.com/jnaujok/pbre/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/jnaujok/pbre/actions/workflows/test.yml)
+[![release](https://img.shields.io/github/v/release/jnaujok/pbre?sort=semver)](https://github.com/jnaujok/pbre/releases/latest)
+[![python](https://img.shields.io/badge/python-3.12%2B-blue)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
+[![dependencies](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
+[![packaging](https://img.shields.io/badge/packaging-poetry-cyan)](https://python-poetry.org/)
+
 **Protobuf reverse engineering.** Give `pbre` a binary protobuf blob with no
 schema. It decodes every field into a readable tree, works out the most likely
 type of each field, and can write a `.proto` file that parses the data. It is
