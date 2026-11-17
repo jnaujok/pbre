@@ -65,6 +65,22 @@ also run it with `poetry run python -m pbre ...`.
 Every CI run also builds the wheel and sdist and keeps them as a
 downloadable `pbre-dist` artifact on the workflow run's page in the Actions tab.
 
+### Releases
+
+Tagged versions are published on the repository's
+[Releases page](https://github.com/jnaujok/pbre/releases) with the wheel and
+sdist attached, so they can be downloaded without a GitHub login and don't
+expire. To cut a release, bump the version, merge to `main`, then tag it:
+
+```
+poetry version patch      # or minor / major; commit and merge this change
+git tag v$(poetry version --short)
+git push origin v$(poetry version --short)
+```
+
+The release workflow refuses a tag that doesn't match the version in
+`pyproject.toml`, runs the tests, builds the package and creates the release.
+
 ## Usage
 
 ```

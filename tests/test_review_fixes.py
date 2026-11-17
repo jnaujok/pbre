@@ -78,3 +78,12 @@ def test_32_bit_types_use_low_32_bits(hex_blob, hint, expected):
     msg = cls()
     msg.ParseFromString(blob)
     assert str(msg.field_1) == expected
+
+
+def test_reserved_field_omission_respects_no_comments():
+    blob = b"\x08\x07" + encode_varint(19001 << 3) + b"\x05"
+    _, schema = analyze(blob)
+    proto = generate_proto(schema, comments=False)
+    assert "//" not in proto
+    assert "19001" not in proto
+    assert "field_1 = 1;" in proto
