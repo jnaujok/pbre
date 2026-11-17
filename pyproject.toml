@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pbre"
+version = "0.1.0"
+description = "Protobuf reverse engineering: decode schemaless protobuf blobs and infer .proto definitions"
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = []
+
+[project.optional-dependencies]
+test = ["pytest", "protobuf", "grpcio-tools"]
+
+[project.scripts]
+pbre = "pbre.cli:main"
+
+[tool.setuptools]
+packages = ["pbre"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
