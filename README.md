@@ -5,6 +5,7 @@
 [![python](https://img.shields.io/badge/python-3.12%2B-blue)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
 [![dependencies](https://img.shields.io/badge/runtime%20dependencies-none-brightgreen)](https://github.com/jnaujok/pbre/blob/main/pyproject.toml)
 [![packaging](https://img.shields.io/badge/packaging-poetry-cyan)](https://python-poetry.org/)
+[![license](https://img.shields.io/badge/license-Apache%202.0-blue)](LICENSE)
 
 **Protobuf reverse engineering.** Give `pbre` a binary protobuf blob with no
 schema. It decodes every field into a readable tree, works out the most likely
@@ -345,3 +346,7 @@ byte for byte. One of the test inputs is descriptor.proto's own
   because protobuf can't mark where one ends and the next begins.
 * Maps are emitted as repeated `FieldN` messages with fields 1 and 2. Wire
   compatibility is identical, so you can rewrite them as `map<K, V>` by hand.
+
+## License
+
+Licensed under the [Apache License, Version 2.0](LICENSE).
