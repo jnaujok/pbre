@@ -290,7 +290,8 @@ def _repair_one(label: str, blob: bytes):
         raise SystemExit(
             f"pbre: {label}: --repair found no consistent structure, assuming each EF BF BD is one "
             "lost byte. Some may stand for two or three bytes (a truncated multi-byte sequence), "
-            "or the input has extra bytes around the message. The only real fix is a clean capture."
+            "the input is cut short, or it has extra bytes around the message. The only real fix "
+            "is a clean capture."
         )
     err = sys.stderr
     for note in result.notes:
