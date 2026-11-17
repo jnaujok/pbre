@@ -1,10 +1,21 @@
 name: release
 on:
+  # Push a tag such as v0.1.0 ...
   push:
     tags: ["v*"]
+  # ... or use the "Run workflow" button in the Actions tab, which tags the
+  # tip of main with the version in pyproject.toml and releases it.
+  workflow_dispatch:
 
 permissions:
-  contents: write  # needed to create the release and upload files to it
+  contents: write  # needed to create the tag, the release and upload files to it
+
+# One group per tag (or per branch for manual runs), so runs for the same
+# release never overlap, and a pending run for one version can't be replaced
+# by a run for a different version.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -15,13 +26,30 @@ jobs:
         with:
           python-version: "3.13"
       - run: pipx install poetry
-      - name: Check the tag matches the package version
+      - name: Work out the tag and check it against the package version
+        id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           version="$(poetry version --short)"
-          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
-            echo "::error::tag ${GITHUB_REF_NAME} does not match pyproject.toml version ${version} (expected v${version})"
-            exit 1
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+              echo "::error::run this workflow from main (it was run from ${GITHUB_REF_NAME})"
+              exit 1
+            fi
+            tag="v${version}"
+            if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${tag}" >/dev/null 2>&1; then
+              echo "::error::tag ${tag} already exists; bump the version with 'poetry version patch|minor|major' and merge that first"
+              exit 1
+            fi
+          else
+            tag="${GITHUB_REF_NAME}"
+            if [ "${tag}" != "v${version}" ]; then
+              echo "::error::tag ${tag} does not match pyproject.toml version ${version} (expected v${version})"
+              exit 1
+            fi
           fi
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
       - run: poetry env use "$(which python)"
       - run: poetry install
       - run: poetry run pytest -q
@@ -29,4 +57,13 @@ jobs:
       - name: Create the GitHub Release with the wheel and sdist attached
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "pbre ${GITHUB_REF_NAME}" --generate-notes --verify-tag
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          if [ "${GITHUB_EVENT_NAME}" = "workflow_dispatch" ]; then
+            # Create the tag on the commit this run tested and built. Creating
+            # a ref fails if it already exists, so a tag pushed while this run
+            # was testing can never have this run's files attached to it.
+            gh api "repos/${GITHUB_REPOSITORY}/git/refs" \
+              -f ref="refs/tags/${TAG}" -f sha="${GITHUB_SHA}" >/dev/null
+          fi
+          gh release create "${TAG}" dist/* --title "pbre ${TAG}" --generate-notes --verify-tag

@@ -70,16 +70,25 @@ downloadable `pbre-dist` artifact on the workflow run's page in the Actions tab.
 Tagged versions are published on the repository's
 [Releases page](https://github.com/jnaujok/pbre/releases) with the wheel and
 sdist attached, so they can be downloaded without a GitHub login and don't
-expire. To cut a release, bump the version, merge to `main`, then tag it:
+expire.
 
-```
-poetry version patch      # or minor / major; commit and merge this change
-git tag v$(poetry version --short)
-git push origin v$(poetry version --short)
-```
+To cut a release:
 
-The release workflow refuses a tag that doesn't match the version in
-`pyproject.toml`, runs the tests, builds the package and creates the release.
+1. Bump the version with `poetry version patch` (or `minor` / `major`), then
+   commit and merge that change to `main`.
+2. Either go to **Actions → release → Run workflow** and run it on `main`, or
+   push a matching tag yourself:
+
+   ```
+   git tag v$(poetry version --short)
+   git push origin v$(poetry version --short)
+   ```
+
+The **Run workflow** button tags the tip of `main` as `v<version>`, using the
+version in `pyproject.toml`. It refuses to run from another branch, or if that
+tag already exists. A pushed tag must match the version in `pyproject.toml`.
+Either way, the workflow runs the tests, builds the package and creates the
+release.
 
 ## Usage
 
