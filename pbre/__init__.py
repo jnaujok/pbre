@@ -11,7 +11,7 @@ from .scan import Candidate, ScanResult, find_start, scan
 from .schema import FieldSchema, Hint, MessageSchema, infer_schema, parse_hint
 from .wire import DecodeError
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 __all__ = [
     "DecodeError",
