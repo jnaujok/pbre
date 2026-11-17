@@ -1,0 +1,25 @@
+[project]
+name = "pbre"
+version = "0.1.0"
+description = "Protobuf reverse engineering: decode schemaless protobuf blobs and infer .proto definitions"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[project.scripts]
+pbre = "pbre.cli:main"
+
+[tool.poetry]
+packages = [{ include = "pbre" }]
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8"
+protobuf = ">=5"
+grpcio-tools = ">=1.60"
+
+[build-system]
+requires = ["poetry-core>=2.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
