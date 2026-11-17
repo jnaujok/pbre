@@ -7,7 +7,7 @@ name = "pbre"
 version = "0.1.0"
 description = "Protobuf reverse engineering: decode schemaless protobuf blobs and infer .proto definitions"
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.10"
 dependencies = []
 
 [project.optional-dependencies]

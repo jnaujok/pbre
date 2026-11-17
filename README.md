@@ -55,7 +55,7 @@ message Message {
 pip install .            # or: pip install -e '.[test]' for development
 ```
 
-Requires Python 3.9 or later. You can also run it without installing:
+Requires Python 3.10 or later. You can also run it without installing:
 `python -m pbre ...`
 
 ## Usage
