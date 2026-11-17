@@ -114,6 +114,7 @@ that happens to be empty in one sample is still recognised as a string.
 | `--skip N` | Skip N leading bytes, for example a custom header. |
 | `--find-start` | (`decode`, `proto`) If the input doesn't parse from its first byte, find the most plausible start and end of the message and decode only that span. See [Finding the message in a larger blob](#finding-the-message-in-a-larger-blob). |
 | `--candidate N` | (`decode`, `proto`) Like `--find-start`, but use candidate N from `pbre scan` instead of the best one. |
+| `--repair` | (`decode`, `proto`) Best-effort repair of data that went through a UTF-8 text decode and contains `EF BF BD` sequences. See [Repairing data mangled by a text decode](#repairing-data-mangled-by-a-text-decode). |
 | `--max-field-number N` | Don't read a payload as a nested message if it uses field numbers above N. Lowering this cuts down on binary blobs being mistaken for messages. |
 
 ### Decode options
@@ -185,6 +186,55 @@ first fields. In tests with random junk prefixes of 1–24 bytes, the best
 candidate was exactly right about 75–90% of the time, and the true start was
 in the top three about 99% of the time. Real headers, with zero bytes, magic
 numbers or lengths, usually fail fast and do better.
+
+### Repairing data mangled by a text decode
+
+If your data contains the bytes `EF BF BD`, it was decoded as UTF-8 text and
+encoded again somewhere along the way. Typical culprits are `res.text()`,
+`r.text`, `new String(bytes, UTF_8)`, or copying bytes out of a console or
+log. `EF BF BD` is U+FFFD, the replacement character (�). Every byte that
+wasn't part of a valid UTF-8 sequence was swapped for those three bytes,
+which shifts every offset after it. `pbre scan` and pbre's error messages
+point this out when they see it.
+
+The real fix is to capture the raw bytes: `res.arrayBuffer()`, `r.content`,
+the `byte[]` itself, Base64 or hex in logs, or Wireshark's
+**Copy → …as Hex Stream**. When you can't, `--repair` recovers what's left:
+
+```
+$ pbre decode --repair capture.bin
+pbre: capture.bin: --repair: found 35 replacement characters (EF BF BD); assuming each stands for one lost byte
+pbre: capture.bin: --repair: 0 lost bytes recovered exactly, 1 chosen among alternatives, 34 still unknown
+  offset     1: 0xbe  guess    length of field 8 = 190 bytes; other lengths also parse (176, 172, ...): ...
+  offset    31: 0x??  unknown  value of fixed64 field 2
+  ...
+Message {
+  8 field_8: Field8 {  [1 lost byte: value uncertain]
+    1 field_1: Field1 {
+      1 field_1: string = "U"
+    ...
+      3 field_3: int64 = 1752406491136  [3 lost bytes: value uncertain]
+```
+
+**What it can recover.** Bytes below `0x80` are plain ASCII, so they always
+survive. That means every lost byte was `0x80` or higher, with its varint
+continuation bit set. The length of every varint, and so where every field
+starts and ends, can still be worked out; only 7 bits of value per lost byte
+are gone. `--repair` reads each `EF BF BD` as one such byte and searches for
+the field structure that best explains the whole buffer. Bytes the structure
+pins down, typically lengths, are filled in. Valid UTF-8 strings come through
+untouched.
+
+**What it can't.** The value bits of other lost bytes are gone: parts of
+large numbers, doubles, bytes fields, and sometimes the low bits of a field
+number. Those get a placeholder and are flagged as
+`[N lost bytes: value uncertain]` (or `"lost_bytes"` in JSON). Sometimes
+several lengths parse equally well, typically because the payload's last
+fields could equally belong to the outer message. pbre then picks the longest
+one, so the fields stay nested, marks it `guess` and lists the others.
+Rarely, one `EF BF BD` stands for two or three bytes (a truncated multi-byte
+sequence). If no consistent structure exists under the one-byte assumption,
+`--repair` says so and stops.
 
 ### Hints
 

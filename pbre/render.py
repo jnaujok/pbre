@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 from .decoder import Node, as_double, as_float, to_signed, unpack_values, zigzag_decode
 from .schema import (
@@ -64,52 +64,88 @@ def render_text(
     verbose: bool = False,
     indent: int = 0,
     bytes_limit: int = 48,
+    lost: Optional[Set[int]] = None,
 ) -> str:
+    """Render the tree. ``lost`` is a set of byte offsets whose values are
+    unknown (from ``--repair``); fields containing any are flagged."""
     lines: List[str] = []
-    _render(nodes, schema, verbose, indent, lines, bytes_limit)
+    _render(nodes, schema, verbose, indent, lines, bytes_limit, lost or set())
     return "\n".join(lines)
 
 
-def _render(nodes, schema, verbose, depth, lines, limit):
+def _own_ranges(n: Node, as_message: bool):
+    """Byte ranges that belong to this node itself, not to its children."""
+    if not as_message or not n.children:
+        return [(n.offset, n.end)]
+    ranges = [(n.offset, n.children[0].offset)]
+    for a, b in zip(n.children, n.children[1:]):
+        if a.end < b.offset:
+            ranges.append((a.end, b.offset))
+    ranges.append((n.children[-1].end, n.end))
+    return ranges
+
+
+def lost_in(n: Node, lost: Set[int], as_message: bool) -> int:
+    if not lost:
+        return 0
+    return sum(1 for a, b in _own_ranges(n, as_message) for i in range(a, b) if i in lost)
+
+
+def _lost_note(count: int) -> str:
+    return f"  [{count} lost byte{'s' if count != 1 else ''}: value uncertain]" if count else ""
+
+
+def _render(nodes, schema, verbose, depth, lines, limit, lost):
     ind = "  " * depth
     for n in nodes:
+        first = len(lines)
+        _render_node(n, schema, verbose, depth, lines, limit, lost)
         f = schema.fields.get(n.number) if schema else None
-        prefix = f"{ind}"
-        if verbose:
-            prefix += f"[@{n.offset} {_WIRE_NAMES[n.wire_type]}] "
-        if not _matches(n, f):
-            lines.append(prefix + _raw_line(n, verbose, limit))
-            if n.is_group and n.children is not None:
-                _render(n.children, None, verbose, depth + 1, lines, limit)
-                lines.append(f"{ind}}}")
-            continue
-        assert f is not None
-        label = f"{n.number} {f.name}"
-        if f.type in ("message", "group"):
-            children = n.children or []
-            lines.append(f"{prefix}{label}: {f.message.name} {{")
-            _render(children, f.message, verbose, depth + 1, lines, limit)
+        as_message = bool(n.children is not None and (n.is_group or (f is not None and f.type in ("message", "group"))))
+        count = lost_in(n, lost, as_message)
+        if count and first < len(lines):
+            lines[first] += _lost_note(count)
+
+
+def _render_node(n, schema, verbose, depth, lines, limit, lost):
+    ind = "  " * depth
+    f = schema.fields.get(n.number) if schema else None
+    prefix = f"{ind}"
+    if verbose:
+        prefix += f"[@{n.offset} {_WIRE_NAMES[n.wire_type]}] "
+    if not _matches(n, f):
+        lines.append(prefix + _raw_line(n, verbose, limit))
+        if n.is_group and n.children is not None:
+            _render(n.children, None, verbose, depth + 1, lines, limit, lost)
             lines.append(f"{ind}}}")
-        elif f.is_scalar:
-            cls = wire_class(f.type)
-            if n.is_len:
-                vals = [format_scalar(f.type, v) for v in unpack_values(n, cls)]
-                lines.append(f"{prefix}{label}: {f.type} = [{', '.join(vals)}]  (packed)")
-            else:
-                line = f"{prefix}{label}: {f.type} = {format_scalar(f.type, n.value)}"
-                if verbose:
-                    line += f"  ({_alternates(n)})"
-                lines.append(line)
+        return
+    assert f is not None
+    label = f"{n.number} {f.name}"
+    if f.type in ("message", "group"):
+        children = n.children or []
+        lines.append(f"{prefix}{label}: {f.message.name} {{")
+        _render(children, f.message, verbose, depth + 1, lines, limit, lost)
+        lines.append(f"{ind}}}")
+    elif f.is_scalar:
+        cls = wire_class(f.type)
+        if n.is_len:
+            vals = [format_scalar(f.type, v) for v in unpack_values(n, cls)]
+            lines.append(f"{prefix}{label}: {f.type} = [{', '.join(vals)}]  (packed)")
         else:
-            data: bytes = n.value
-            line = f"{prefix}{label}: {f.type} = {format_len(f.type, data, 0 if verbose else limit)}"
+            line = f"{prefix}{label}: {f.type} = {format_scalar(f.type, n.value)}"
             if verbose:
-                line += f"  ({len(data)} bytes)"
-            if f.type == "bytes" and data and n.packed_varints is not None and n.children is None:
-                vals = n.packed_varints
-                shown = ", ".join(str(v) for v in vals[:8]) + (", ..." if len(vals) > 8 else "")
-                line += f"  (or packed varints: [{shown}])"
+                line += f"  ({_alternates(n)})"
             lines.append(line)
+    else:
+        data: bytes = n.value
+        line = f"{prefix}{label}: {f.type} = {format_len(f.type, data, 0 if verbose else limit)}"
+        if verbose:
+            line += f"  ({len(data)} bytes)"
+        if f.type == "bytes" and data and n.packed_varints is not None and n.children is None:
+            vals = n.packed_varints
+            shown = ", ".join(str(v) for v in vals[:8]) + (", ..." if len(vals) > 8 else "")
+            line += f"  (or packed varints: [{shown}])"
+        lines.append(line)
 
 
 def _raw_line(n: Node, verbose: bool, limit: int) -> str:
@@ -121,7 +157,10 @@ def _raw_line(n: Node, verbose: bool, limit: int) -> str:
     return f"{n.number}: <{_WIRE_NAMES[n.wire_type]}> = {n.value}  ({_alternates(n)})"
 
 
-def to_json(nodes: List[Node], schema: Optional[MessageSchema]) -> List[Dict[str, Any]]:
+def to_json(
+    nodes: List[Node], schema: Optional[MessageSchema], lost: Optional[Set[int]] = None
+) -> List[Dict[str, Any]]:
+    lost = lost or set()
     out = []
     for n in nodes:
         f = schema.fields.get(n.number) if schema else None
@@ -134,18 +173,19 @@ def to_json(nodes: List[Node], schema: Optional[MessageSchema]) -> List[Dict[str
         if not _matches(n, f):
             entry["type"] = None
             if n.is_group:
-                entry["fields"] = to_json(n.children or [], None)
+                entry["fields"] = to_json(n.children or [], None, lost)
             elif n.is_len:
                 entry["value"] = n.value.hex()
             else:
                 entry["value"] = n.value
+            _json_lost(entry, n, lost, n.is_group)
             out.append(entry)
             continue
         assert f is not None
         entry["name"] = f.name
         entry["type"] = f.message.name if f.type in ("message", "group") else f.type
         if f.type in ("message", "group"):
-            entry["fields"] = to_json(n.children or [], f.message)
+            entry["fields"] = to_json(n.children or [], f.message, lost)
         elif f.is_scalar:
             cls = wire_class(f.type)
             if n.is_len:
@@ -157,8 +197,15 @@ def to_json(nodes: List[Node], schema: Optional[MessageSchema]) -> List[Dict[str
             entry["value"] = n.value.decode("utf-8", errors="replace")
         else:
             entry["value"] = n.value.hex()
+        _json_lost(entry, n, lost, f.type in ("message", "group"))
         out.append(entry)
     return out
+
+
+def _json_lost(entry: Dict[str, Any], n: Node, lost: Set[int], as_message: bool) -> None:
+    count = lost_in(n, lost, as_message and n.children is not None)
+    if count:
+        entry["lost_bytes"] = count
 
 
 def _json_scalar(type_name: str, v: int):

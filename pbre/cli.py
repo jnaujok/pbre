@@ -13,6 +13,7 @@ from .decoder import DecodeOptions, decode
 from .inputs import decode_text_encoding, split_frames
 from .protogen import generate_proto
 from .render import preview, render_text, to_json
+from .repair import RepairTooHard, count_replacements, repair
 from .scan import LOW_CONFIDENCE, find_start, scan
 from .schema import infer_schema, parse_hint
 from .wire import MAX_FIELD_NUMBER, DecodeError, parse_message
@@ -88,12 +89,14 @@ def build_parser() -> argparse.ArgumentParser:
     d.add_argument("--proto", metavar="PATH", help="also write the inferred .proto to PATH ('-' for stdout)")
     d.add_argument("--no-prompt", action="store_true", help="never offer to generate a .proto")
     _add_find_start(d)
+    _add_repair(d)
     _add_proto_opts(d)
 
     p = sub.add_parser("proto", help="infer and print a .proto definition")
     _add_common(p)
     p.add_argument("-o", "--output", metavar="PATH", default="-", help="write to PATH (default: stdout)")
     _add_find_start(p)
+    _add_repair(p)
     _add_proto_opts(p)
 
     s = sub.add_parser(
@@ -118,6 +121,16 @@ def _add_find_start(p: argparse.ArgumentParser) -> None:
         type=int,
         metavar="N",
         help="like --find-start, but use candidate N from 'pbre scan' instead of the best one",
+    )
+
+
+def _add_repair(p: argparse.ArgumentParser) -> None:
+    p.add_argument(
+        "--repair",
+        action="store_true",
+        help="best-effort repair of data mangled by a UTF-8 text decode (EF BF BD "
+        "replacement characters): rebuild the structure, recover what it determines, "
+        "and flag values that contain lost bytes",
     )
 
 
@@ -219,10 +232,24 @@ def _analyze(args):
     located = _read_inputs_located(args)
     if not located:
         raise SystemExit("pbre: no input")
-    if getattr(args, "find_start", False) or getattr(args, "candidate", None) is not None:
+    finding = getattr(args, "find_start", False) or getattr(args, "candidate", None) is not None
+    repairing = getattr(args, "repair", False)
+    if finding and repairing:
+        raise SystemExit("pbre: --repair can't be combined with --find-start/--candidate yet")
+    losts: List[set] = []
+    if repairing:
+        blobs = []
+        for i, (name, blob, _) in enumerate(located):
+            label = f"{name} message {i + 1}" if len(located) > 1 else name
+            fixed, lost = _repair_one(label, blob)
+            blobs.append(fixed)
+            losts.append(lost)
+    elif finding:
         blobs = _locate(args, located)
     else:
         blobs = [blob for _, blob, _ in located]
+    if not losts:
+        losts = [set() for _ in blobs]
     options = DecodeOptions(max_field_number=args.max_field_number)
     decoded = []
     for i, blob in enumerate(blobs):
@@ -230,13 +257,70 @@ def _analyze(args):
             decoded.append(decode(blob, options))
         except DecodeError as e:
             label = f"message {i + 1}" if len(blobs) > 1 else "input"
-            raise SystemExit(
-                f"pbre: {label} is not a valid protobuf message: {e}\n"
-                "hint: try --find-start (or 'pbre scan' to see candidates), "
+            mangled = count_replacements(blob)
+            hint = (
+                f"hint: the input contains {mangled} EF BF BD sequence{'s' if mangled != 1 else ''}"
+                " (U+FFFD): it was probably mangled by a UTF-8 text decode; try --repair"
+                if mangled and not repairing
+                else "hint: try --find-start (or 'pbre scan' to see candidates), "
                 "--format hex/base64, --skip N, --delimited or --grpc"
             )
+            raise SystemExit(f"pbre: {label} is not a valid protobuf message: {e}\n{hint}")
     schema = infer_schema(decoded, args.message_name, hints)
-    return decoded, schema
+    return decoded, schema, losts
+
+
+_MAX_LOST_LINES = 20
+
+
+def _repair_one(label: str, blob: bytes):
+    """Repair one blob, report what was recovered to stderr, and return the
+    repaired bytes plus the offsets whose values are still uncertain."""
+    if not count_replacements(blob):
+        print(f"pbre: {label}: --repair: no EF BF BD sequences found; nothing to repair", file=sys.stderr)
+        return blob, set()
+    try:
+        result = repair(blob)
+    except RepairTooHard as e:
+        raise SystemExit(
+            f"pbre: {label}: --repair gave up: {e}. Too many lost bytes fall in lengths or "
+            "tags for the structure to be worked out; the only real fix is a clean capture."
+        )
+    if result is None:
+        raise SystemExit(
+            f"pbre: {label}: --repair found no consistent structure, assuming each EF BF BD is one "
+            "lost byte. Some may stand for two or three bytes (a truncated multi-byte sequence), "
+            "or the input has extra bytes around the message. The only real fix is a clean capture."
+        )
+    err = sys.stderr
+    for note in result.notes:
+        print(f"pbre: {label}: --repair: {note}", file=err)
+    print(
+        f"pbre: {label}: --repair: {len(blob)} bytes in, {len(result.data)} bytes after collapsing "
+        "the replacements",
+        file=err,
+    )
+    exact = [b for b in result.lost if b.status == "exact"]
+    guess = [b for b in result.lost if b.status == "guess"]
+    unknown = [b for b in result.lost if b.status == "unknown"]
+    print(
+        f"pbre: {label}: --repair: {len(exact)} lost byte{'s' if len(exact) != 1 else ''} recovered "
+        f"exactly, {len(guess)} chosen among alternatives, {len(unknown)} still unknown",
+        file=err,
+    )
+    shown = (exact + guess + unknown)[:_MAX_LOST_LINES]
+    for b in sorted(shown, key=lambda b: b.offset):
+        value = f"0x{b.value:02x}" if b.status != "unknown" else "0x??"
+        print(f"  offset {b.offset:>5}: {value}  {b.status:<7}  {b.what}", file=err)
+    if len(result.lost) > len(shown):
+        print(f"  ... and {len(result.lost) - len(shown)} more", file=err)
+    if unknown:
+        print(
+            "  fields containing unknown bytes are flagged in the output; their values "
+            "(and field numbers, where a tag byte was lost) are placeholders",
+            file=err,
+        )
+    return result.data, result.uncertain
 
 
 def _proto_text(args, schema, n_samples) -> str:
@@ -262,9 +346,9 @@ def _write(path: str, text: str) -> None:
 
 
 def cmd_decode(args) -> int:
-    decoded, schema = _analyze(args)
+    decoded, schema, losts = _analyze(args)
     if args.json:
-        payload = [to_json(nodes, schema) for nodes in decoded]
+        payload = [to_json(nodes, schema, lost) for nodes, lost in zip(decoded, losts)]
         json.dump(payload[0] if len(payload) == 1 else payload, sys.stdout, indent=2, ensure_ascii=False)
         sys.stdout.write("\n")
     else:
@@ -272,7 +356,7 @@ def cmd_decode(args) -> int:
             if len(decoded) > 1:
                 print(f"--- message {i + 1} ---")
             print(f"{schema.name} {{")
-            print(render_text(nodes, schema, verbose=args.verbose, indent=1))
+            print(render_text(nodes, schema, verbose=args.verbose, indent=1, lost=losts[i]))
             print("}")
     if args.proto:
         _write(args.proto, _proto_text(args, schema, len(decoded)))
@@ -393,7 +477,7 @@ def cmd_scan(args) -> int:
 
 
 def cmd_proto(args) -> int:
-    decoded, schema = _analyze(args)
+    decoded, schema, _ = _analyze(args)
     _write(args.output, _proto_text(args, schema, len(decoded)))
     return 0
 

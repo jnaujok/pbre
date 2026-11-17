@@ -279,6 +279,13 @@ def _looks_like_text(buf: bytes, start: int, end: int) -> bool:
 
 def _detect_hints(buf: bytes) -> List[str]:
     hints = []
+    mangled = buf.count(b"\xef\xbf\xbd")
+    if mangled:
+        hints.append(
+            f"contains {mangled} EF BF BD sequence{'s' if mangled != 1 else ''} (U+FFFD): the data was "
+            "probably mangled by a UTF-8 text decode, which shifts every later offset; "
+            "try 'pbre decode --repair' or recapture the raw bytes"
+        )
     if buf[:2] == b"\x1f\x8b":
         hints.append("starts with 1f 8b: looks gzip-compressed; decompress it first")
     elif buf[:1] == b"\x78" and buf[1:2] in (b"\x01", b"\x5e", b"\x9c", b"\xda"):
